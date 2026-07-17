@@ -19,7 +19,7 @@ Each email flows through a two-stage LangGraph workflow:
                          END
 ```
 
-1. **Triage** — an LLM with structured output (`Router`) classifies the email as `ignore`, `notify`, or `respond`. Only `respond` continues; the others end the run.
+1. **Triage** — an LLM with structured output (`Router`) classifies the email as `ignore`, `notify`, or `respond`. Before deciding, it retrieves similar past triage decisions from **episodic memory** and uses them as few-shot examples; after deciding, it records the new decision as an episode. Only `respond` continues; the others end the run.
 2. **Response agent** — a tool-calling agent drafts a reply. It can send email, schedule meetings, check calendar availability, and store/recall long-term memory scoped per user.
 
 ## Requirements
@@ -86,13 +86,36 @@ assistant.process_email({
 | `prompts.py` | Prompt templates for triage and the agent |
 | `config.py` | Owner profile and triage/agent instructions |
 | `samples.py` | Sample emails for the demo |
-| `utils.py` | Email-parsing and few-shot formatting helpers |
+| `utils.py` | Email-parsing and few-shot formatting helpers (episodic memory) |
 
 ## Long-term memory
 
-The agent uses langmem's `manage_memory` and `search_memory` tools, backed by an `InMemoryStore` with an OpenAI embedding index for semantic search. Memory is namespaced per `user_id`, so different users don't share context.
+The assistant has two complementary kinds of long-term memory, both backed by the same `InMemoryStore` with an OpenAI embedding index and both namespaced per `user_id` so users don't share context.
 
-`InMemoryStore` lives only for the process lifetime. For persistence across runs, swap it for a durable `BaseStore` (e.g. a Postgres-backed store) in `assistant.py`.
+### Semantic memory — *facts*
+
+The response agent uses langmem's `manage_memory` and `search_memory` tools to store and recall facts about contacts, conversations, and the owner's preferences (e.g. "Alice is the CFO", "Bob prefers morning meetings"). Namespace: `("email_assistant", user_id, "collection")`.
+
+### Episodic memory — *past decisions*
+
+Triage learns from precedent. Each triage decision is stored as an episode (`email → routing`), and every new email retrieves the most semantically similar past episodes to use as few-shot examples. Namespace: `("email_assistant", user_id, "examples")`.
+
+```
+new email
+   │
+   ├─▶ _retrieve_examples()  ──► store.search(..., "examples")   # 3 most similar past emails + routing
+   ├─▶ router LLM sees rules + those examples  ──► classification
+   └─▶ remember_triage()     ──► store.put(..., "examples")      # this email becomes a future example
+```
+
+By default `triage_router` records its own guess as the "correct" label — convenient for the demo, but it will reinforce its own mistakes. In production, record human-verified labels instead:
+
+```python
+# after a human corrects a misroute:
+assistant.remember_triage(email_input, correct_routing="respond", original_routing="notify")
+```
+
+`InMemoryStore` lives only for the process lifetime, so both memories reset each run. For persistence across runs, swap it for a durable `BaseStore` (e.g. a Postgres-backed store) in `assistant.py`.
 
 ## Notes
 
