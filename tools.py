@@ -7,10 +7,10 @@ from langmem import create_manage_memory_tool, create_search_memory_tool
 # Long-term memory tools. `{langgraph_user_id}` is resolved at runtime from the
 # invocation config, so each user gets an isolated memory namespace. Both tools
 # require a BaseStore to be attached to the graph/agent at compile time.
-manage_memory = create_manage_memory_tool(
+manage_memory_tool = create_manage_memory_tool(
     namespace=("email_assistant", "{langgraph_user_id}", "collection")
 )
-search_memory = create_search_memory_tool(
+search_memory_tool = create_search_memory_tool(
     namespace=("email_assistant", "{langgraph_user_id}", "collection")
 )
 

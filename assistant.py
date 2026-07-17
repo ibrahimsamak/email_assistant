@@ -13,13 +13,13 @@ from langgraph.types import Command
 from langgraph.store.memory import InMemoryStore
 
 from schemas import Router, State
-from prompts import triage_system_prompt, triage_user_prompt, agent_system_prompt
+from prompts import triage_system_prompt, triage_user_prompt, agent_system_prompt, agent_system_prompt_memory
 from tools import (
     write_email,
     schedule_meeting,
     check_calendar_availability,
-    manage_memory,
-    search_memory,
+    manage_memory_tool,
+    search_memory_tool,
 )
 
 warnings.filterwarnings("ignore", message="Pydantic serializer warnings")
@@ -42,7 +42,8 @@ class EmailAssistant:
         self.store = InMemoryStore(
             index={"dims": 1536, "embed": "openai:text-embedding-3-small"}
         )
-
+        qry = self.store.search(('email_assistant', 'Ibrahim1', 'collection'), query="Alice Smith's")
+        print(f"Query: {qry}")
         self.llm = ChatOpenAI(model=model, temperature=0, api_key=os.getenv("OPENAI_API_KEY"))
         self.llm_router = self.llm.with_structured_output(Router)
 
@@ -50,8 +51,8 @@ class EmailAssistant:
             write_email,
             schedule_meeting,
             check_calendar_availability,
-            manage_memory,
-            search_memory,
+            manage_memory_tool,
+            search_memory_tool,
         ]
         self.agent = create_agent(
             tools=self.tools,
@@ -64,7 +65,7 @@ class EmailAssistant:
 
     # --- Prompt builders --------------------------------------------------
     def _agent_system_prompt(self) -> str:
-        return agent_system_prompt.format(instructions=self.prompt_instructions["agent_instructions"], **self.profile)
+        return agent_system_prompt_memory.format(instructions=self.prompt_instructions["agent_instructions"], profile=self.profile, **self.profile)
 
     def _triage_system_prompt(self) -> str:
         return triage_system_prompt.format(
