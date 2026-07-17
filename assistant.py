@@ -1,6 +1,7 @@
 """EmailAssistant: triages incoming email and drafts responses via a LangGraph workflow."""
 
 import os
+import uuid
 import warnings
 
 from dotenv import load_dotenv
@@ -14,6 +15,7 @@ from langgraph.store.memory import InMemoryStore
 
 from schemas import Router, State
 from prompts import triage_system_prompt, triage_user_prompt, agent_system_prompt_memory
+from utils import format_few_shot_examples
 from tools import (
     write_email,
     schedule_meeting,
@@ -67,7 +69,7 @@ class EmailAssistant:
     def _agent_system_prompt(self) -> str:
         return agent_system_prompt_memory.format(instructions=self.prompt_instructions["agent_instructions"], profile=self.profile, **self.profile)
 
-    def _triage_system_prompt(self) -> str:
+    def _triage_system_prompt(self, examples: str | None = None) -> str:
         return triage_system_prompt.format(
             full_name=self.profile["full_name"],
             name=self.profile["name"],
@@ -75,7 +77,7 @@ class EmailAssistant:
             triage_no=self.prompt_instructions["triage_rules"]["ignore"],
             triage_notify=self.prompt_instructions["triage_rules"]["notify"],
             triage_email=self.prompt_instructions["triage_rules"]["respond"],
-            examples=None,
+            examples=examples or "No examples yet.",
         )
 
     # --- Graph ------------------------------------------------------------
@@ -87,6 +89,37 @@ class EmailAssistant:
         graph.add_edge("response_agent", END)
         return graph.compile(store=self.store)
 
+    # --- Episodic memory --------------------------------------------------
+    def _episodic_namespace(self) -> tuple:
+        """Namespace holding past triage episodes for the current user."""
+        return ("email_assistant", self.user_id, "examples")
+
+    def _retrieve_examples(self, email_data: dict, limit: int = 3) -> str | None:
+        """Fetch the most similar past triage episodes as few-shot examples."""
+        query = (
+            f"Subject: {email_data['subject']}\n"
+            f"From: {email_data['author']}\n"
+            f"{email_data['email_thread']}"
+        )
+        results = self.store.search(self._episodic_namespace(), query=query, limit=limit)
+        if not results:
+            return None
+        return format_few_shot_examples(results)
+
+    def remember_triage(self, email_data: dict, correct_routing: str, original_routing: str | None = None) -> None:
+        """Record a triage decision as an episode for future few-shot retrieval.
+
+        Call this after a triage (or after a human correction) so the assistant
+        learns from precedent. `correct_routing` is the label that should have
+        been used; `original_routing` is what the router first produced.
+        """
+        value = (
+            f"{email_data} "
+            f"Original routing: {original_routing or correct_routing} "
+            f"Correct routing: {correct_routing}"
+        )
+        self.store.put(self._episodic_namespace(), key=str(uuid.uuid4()), value={"value": value})
+
     def triage_router(self, state: State) -> Command[Literal["response_agent", "__end__"]]:
         email_data = state["email_input"]
         user_prompt = triage_user_prompt.format(
@@ -95,12 +128,18 @@ class EmailAssistant:
             subject=email_data["subject"],
             email_thread=email_data["email_thread"],
         )
+        examples = self._retrieve_examples(email_data)
         result = self.llm_router.invoke(
             [
-                {"role": "system", "content": self._triage_system_prompt()},
+                {"role": "system", "content": self._triage_system_prompt(examples)},
                 {"role": "user", "content": user_prompt},
             ]
         )
+
+        # Record this triage as an episode so future, similar emails retrieve it
+        # as a few-shot example. In production, prefer calling `remember_triage`
+        # with a human-verified label instead of the router's raw guess.
+        self.remember_triage(email_data, correct_routing=result.classification)
 
         if result.classification == "respond":
             print("📧 Classification: RESPOND - This email requires a response")

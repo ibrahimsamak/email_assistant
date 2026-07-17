@@ -39,10 +39,14 @@ def format_few_shot_examples(examples):
     """
     formatted = []
     for example in examples:
+        # Store values are dicts ({"value": "..."}); accept a bare string too.
+        raw = getattr(example, "value", example)
+        if isinstance(raw, dict):
+            raw = raw.get("value", "")
         # Parse the example value string into components
-        email_part = example.value.split('Original routing:')[0].strip()
-        original_routing = example.value.split('Original routing:')[1].split('Correct routing:')[0].strip()
-        correct_routing = example.value.split('Correct routing:')[1].strip()
+        email_part = raw.split('Original routing:')[0].strip()
+        original_routing = raw.split('Original routing:')[1].split('Correct routing:')[0].strip()
+        correct_routing = raw.split('Correct routing:')[1].strip()
         
         # Format into clean string
         formatted_example = f"""Example:
