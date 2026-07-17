@@ -1,0 +1,100 @@
+# Email Assistant
+
+An AI executive-assistant agent that **triages incoming email** and **drafts responses**, built on [LangChain](https://python.langchain.com/) and [LangGraph](https://langchain-ai.github.io/langgraph/) with long-term memory via [langmem](https://github.com/langchain-ai/langmem).
+
+## How it works
+
+Each email flows through a two-stage LangGraph workflow:
+
+```
+                 ┌─────────────────┐
+  email_input ──▶│  triage_router  │  classify: ignore / notify / respond
+                 └────────┬────────┘
+                          │ respond
+                          ▼
+                 ┌─────────────────┐
+                 │  response_agent │  draft reply using tools + memory
+                 └────────┬────────┘
+                          ▼
+                         END
+```
+
+1. **Triage** — an LLM with structured output (`Router`) classifies the email as `ignore`, `notify`, or `respond`. Only `respond` continues; the others end the run.
+2. **Response agent** — a tool-calling agent drafts a reply. It can send email, schedule meetings, check calendar availability, and store/recall long-term memory scoped per user.
+
+## Requirements
+
+- Python 3.11+
+- An OpenAI API key
+
+## Setup
+
+```bash
+pip install -r requirements.txt
+```
+
+> **Note:** the code targets the LangChain/LangGraph **1.x** stack, pinned in `requirements.txt`:
+> `langchain 1.0.5`, `langchain-openai 1.0.2`, `langchain-anthropic 1.4.8`, `langchain-core 1.4.9`, `langgraph 1.0.7`, `langmem 0.0.30`, `pydantic 2.12.4`. Older LangGraph/langmem versions are incompatible (`ImportError: CONFIG_KEY_STORE`).
+
+Create a `.env` file in the project root:
+
+```
+OPENAI_API_KEY=sk-...
+```
+
+## Usage
+
+Run the demo:
+
+```bash
+python3 main.py
+```
+
+Or use the assistant directly:
+
+```python
+from assistant import EmailAssistant
+from config import profile, prompt_instructions
+
+assistant = EmailAssistant(profile, prompt_instructions, user_id="ibrahim")
+
+# One-off question to the agent
+print(assistant.ask("what is my availability for tuesday?"))
+
+# Triage + draft a response to an email
+assistant.process_email({
+    "author": "Alice Smith <alice.smith@company.com>",
+    "to": "John Doe <john.doe@company.com>",
+    "subject": "Quick question about API documentation",
+    "email_thread": "Hi John, could you clarify the missing auth endpoints? Thanks, Alice",
+})
+```
+
+## Configuration
+
+- **`config.py`** — `profile` (the assistant's owner) and `prompt_instructions` (triage rules and agent instructions). Edit these to change who the assistant works for and how it categorizes email.
+- **`EmailAssistant(..., model=..., user_id=...)`** — choose the model (default `gpt-4o`) and the memory namespace user (default `"default"`). Each `user_id` gets an isolated memory store.
+
+## Project structure
+
+| File | Responsibility |
+|------|----------------|
+| `main.py` | Entry point; wires the assistant to sample data and runs a demo |
+| `assistant.py` | `EmailAssistant` class — LLM, tools, graph, triage logic, memory |
+| `tools.py` | Agent tools: email/meeting/calendar stubs + langmem memory tools |
+| `schemas.py` | `Router` (triage output) and `State` (graph state) |
+| `prompts.py` | Prompt templates for triage and the agent |
+| `config.py` | Owner profile and triage/agent instructions |
+| `samples.py` | Sample emails for the demo |
+| `utils.py` | Email-parsing and few-shot formatting helpers |
+
+## Long-term memory
+
+The agent uses langmem's `manage_memory` and `search_memory` tools, backed by an `InMemoryStore` with an OpenAI embedding index for semantic search. Memory is namespaced per `user_id`, so different users don't share context.
+
+`InMemoryStore` lives only for the process lifetime. For persistence across runs, swap it for a durable `BaseStore` (e.g. a Postgres-backed store) in `assistant.py`.
+
+## Notes
+
+- The `write_email`, `schedule_meeting`, and `check_calendar_availability` tools are **placeholder stubs** that return formatted strings. Wire them to real email/calendar services for production use.
+- There are currently no automated tests.
