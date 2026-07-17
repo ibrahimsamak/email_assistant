@@ -20,7 +20,7 @@ Each email flows through a two-stage LangGraph workflow:
 ```
 
 1. **Triage** — an LLM with structured output (`Router`) classifies the email as `ignore`, `notify`, or `respond`. Before deciding, it retrieves similar past triage decisions from **episodic memory** and uses them as few-shot examples; after deciding, it records the new decision as an episode. Only `respond` continues; the others end the run.
-2. **Response agent** — a tool-calling agent drafts a reply. It can send email, schedule meetings, check calendar availability, and store/recall long-term memory scoped per user.
+2. **Response agent** — a tool-calling agent drafts a reply. It can send email, schedule meetings, check calendar availability, and store/recall long-term memory scoped per user. Its instructions come from **procedural memory** and can be rewritten from feedback.
 
 ## Requirements
 
@@ -72,7 +72,7 @@ assistant.process_email({
 
 ## Configuration
 
-- **`config.py`** — `profile` (the assistant's owner) and `prompt_instructions` (triage rules and agent instructions). Edit these to change who the assistant works for and how it categorizes email.
+- **`config.py`** — `profile` (the assistant's owner) and `prompt_instructions` (triage rules and agent instructions). `prompt_instructions` **seeds** procedural memory on first run; after that the live instructions live in the store and can be rewritten via `update_instructions` (see [Procedural memory](#procedural-memory--how-to-behave)).
 - **`EmailAssistant(..., model=..., user_id=...)`** — choose the model (default `gpt-4o`) and the memory namespace user (default `"default"`). Each `user_id` gets an isolated memory store.
 
 ## Project structure
@@ -82,7 +82,7 @@ assistant.process_email({
 | `main.py` | Entry point; wires the assistant to sample data and runs a demo |
 | `assistant.py` | `EmailAssistant` class — LLM, tools, graph, triage logic, memory |
 | `tools.py` | Agent tools: email/meeting/calendar stubs + langmem memory tools |
-| `schemas.py` | `Router` (triage output) and `State` (graph state) |
+| `schemas.py` | `Router` (triage output), `TriageRules` (procedural memory), and `State` (graph state) |
 | `prompts.py` | Prompt templates for triage and the agent |
 | `config.py` | Owner profile and triage/agent instructions |
 | `samples.py` | Sample emails for the demo |
@@ -90,7 +90,13 @@ assistant.process_email({
 
 ## Long-term memory
 
-The assistant has two complementary kinds of long-term memory, both backed by the same `InMemoryStore` with an OpenAI embedding index and both namespaced per `user_id` so users don't share context.
+The assistant has three complementary kinds of long-term memory, all backed by the same `InMemoryStore` with an OpenAI embedding index and all namespaced per `user_id` so users don't share context.
+
+| Type | Stores | Namespace |
+|------|--------|-----------|
+| Semantic | facts about people & context | `("email_assistant", user_id, "collection")` |
+| Episodic | past triage decisions as examples | `("email_assistant", user_id, "examples")` |
+| Procedural | the agent's own instructions & triage rules | `("email_assistant", user_id, "procedures")` |
 
 ### Semantic memory — *facts*
 
@@ -115,7 +121,22 @@ By default `triage_router` records its own guess as the "correct" label — conv
 assistant.remember_triage(email_input, correct_routing="respond", original_routing="notify")
 ```
 
-`InMemoryStore` lives only for the process lifetime, so both memories reset each run. For persistence across runs, swap it for a durable `BaseStore` (e.g. a Postgres-backed store) in `assistant.py`.
+### Procedural memory — *how to behave*
+
+The agent's operating instructions and triage rules live in the store instead of being hard-coded. On first run they are seeded from `prompt_instructions` in `config.py`; the prompts then read the live copy on every call. Feedback rewrites them via an LLM, and the change takes effect immediately (the agent and graph are rebuilt, since `create_agent`'s system prompt is fixed at creation). Namespace: `("email_assistant", user_id, "procedures")`.
+
+```python
+# teach the response agent a new behavior
+assistant.update_instructions("Always CC my manager sarah@company.com on external replies.")
+
+# adjust triage behavior instead of agent behavior
+assistant.update_instructions("Treat recruiter emails as 'notify', not 'respond'.", kind="triage")
+
+# subsequent emails follow the revised instructions
+assistant.process_email({...})
+```
+
+`InMemoryStore` lives only for the process lifetime, so all three memories reset each run. For persistence across runs, swap it for a durable `BaseStore` (e.g. a Postgres-backed store) in `assistant.py`.
 
 ## Notes
 

@@ -16,6 +16,13 @@ class Router(BaseModel):
         "'respond' for emails that need a reply",
     )
 
+class TriageRules(BaseModel):
+    """Editable triage rules stored in procedural memory."""
+
+    ignore: str = Field(description="What kinds of emails to ignore.")
+    notify: str = Field(description="What kinds of emails to notify about without replying.")
+    respond: str = Field(description="What kinds of emails require a direct response.")
+
 class State(TypedDict):
     email_input: dict
     messages: Annotated[list, add_messages]

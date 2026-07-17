@@ -13,7 +13,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.types import Command
 from langgraph.store.memory import InMemoryStore
 
-from schemas import Router, State
+from schemas import Router, State, TriageRules
 from prompts import triage_system_prompt, triage_user_prompt, agent_system_prompt_memory
 from utils import format_few_shot_examples
 from tools import (
@@ -49,6 +49,10 @@ class EmailAssistant:
         self.llm = ChatOpenAI(model=model, temperature=0, api_key=os.getenv("OPENAI_API_KEY"))
         self.llm_router = self.llm.with_structured_output(Router)
 
+        # Procedural memory: seed the store with the config instructions on first
+        # run so prompts read behavior from memory (and can be rewritten later).
+        self._seed_procedures()
+
         self.tools = [
             write_email,
             schedule_meeting,
@@ -67,16 +71,19 @@ class EmailAssistant:
 
     # --- Prompt builders --------------------------------------------------
     def _agent_system_prompt(self) -> str:
-        return agent_system_prompt_memory.format(instructions=self.prompt_instructions["agent_instructions"], profile=self.profile, **self.profile)
+        procedures = self._load_procedures()
+        return agent_system_prompt_memory.format(instructions=procedures["agent_instructions"], profile=self.profile, **self.profile)
 
     def _triage_system_prompt(self, examples: str | None = None) -> str:
+        procedures = self._load_procedures()
+        triage_rules = procedures["triage_rules"]
         return triage_system_prompt.format(
             full_name=self.profile["full_name"],
             name=self.profile["name"],
             user_profile_background=self.profile["user_profile_background"],
-            triage_no=self.prompt_instructions["triage_rules"]["ignore"],
-            triage_notify=self.prompt_instructions["triage_rules"]["notify"],
-            triage_email=self.prompt_instructions["triage_rules"]["respond"],
+            triage_no=triage_rules["ignore"],
+            triage_notify=triage_rules["notify"],
+            triage_email=triage_rules["respond"],
             examples=examples or "No examples yet.",
         )
 
@@ -88,6 +95,73 @@ class EmailAssistant:
         graph.add_edge(START, "triage_router")
         graph.add_edge("response_agent", END)
         return graph.compile(store=self.store)
+
+    # --- Procedural memory ------------------------------------------------
+    def _procedural_namespace(self) -> tuple:
+        """Namespace holding the agent's editable instructions for this user."""
+        return ("email_assistant", self.user_id, "procedures")
+
+    def _seed_procedures(self) -> None:
+        """Load config instructions into the store once, if not already present."""
+        if self.store.get(self._procedural_namespace(), "main") is None:
+            self.store.put(
+                self._procedural_namespace(),
+                key="main",
+                value={
+                    "agent_instructions": self.prompt_instructions["agent_instructions"],
+                    "triage_rules": self.prompt_instructions["triage_rules"],
+                },
+                index=False,  # fetched by key, not by semantic search
+            )
+
+    def _load_procedures(self) -> dict:
+        """Read the current instructions from procedural memory (config fallback)."""
+        item = self.store.get(self._procedural_namespace(), "main")
+        if item is None:
+            return self.prompt_instructions
+        return item.value
+
+    def update_instructions(self, feedback: str, kind: Literal["agent", "triage"] = "agent") -> dict:
+        """Rewrite the agent's instructions from feedback and persist them.
+
+        `kind="agent"` updates the response-agent instructions; `kind="triage"`
+        updates the triage rules. The updated behavior takes effect immediately
+        (the agent is rebuilt so its system prompt reflects the new procedures).
+        """
+        procedures = dict(self._load_procedures())
+
+        if kind == "agent":
+            current = procedures["agent_instructions"]
+            prompt = (
+                "You maintain an email assistant's operating instructions. Rewrite the "
+                "instructions below to incorporate the user's feedback. Keep everything "
+                "that still applies, change only what the feedback implies, and return "
+                "ONLY the full revised instructions.\n\n"
+                f"Current instructions:\n{current}\n\nUser feedback:\n{feedback}"
+            )
+            procedures["agent_instructions"] = self.llm.invoke(prompt).content.strip()
+        else:
+            current = procedures["triage_rules"]
+            updated = self.llm.with_structured_output(TriageRules).invoke(
+                "You maintain the triage rules of an email assistant. Rewrite the rules "
+                "to incorporate the user's feedback, keeping what still applies.\n\n"
+                f"Current rules:\nignore: {current['ignore']}\nnotify: {current['notify']}\n"
+                f"respond: {current['respond']}\n\nUser feedback:\n{feedback}"
+            )
+            procedures["triage_rules"] = updated.model_dump()
+
+        self.store.put(self._procedural_namespace(), key="main", value=procedures, index=False)
+
+        # The agent's system prompt is fixed at creation, so rebuild it (and the
+        # graph) to pick up the new instructions.
+        self.agent = create_agent(
+            tools=self.tools,
+            model=self.model,
+            system_prompt=self._agent_system_prompt(),
+            store=self.store,
+        )
+        self.workflow = self._build_graph()
+        return procedures
 
     # --- Episodic memory --------------------------------------------------
     def _episodic_namespace(self) -> tuple:
