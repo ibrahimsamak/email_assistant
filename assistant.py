@@ -13,7 +13,7 @@ from langgraph.types import Command
 from langgraph.store.memory import InMemoryStore
 
 from schemas import Router, State
-from prompts import triage_system_prompt, triage_user_prompt, agent_system_prompt, agent_system_prompt_memory
+from prompts import triage_system_prompt, triage_user_prompt, agent_system_prompt_memory
 from tools import (
     write_email,
     schedule_meeting,

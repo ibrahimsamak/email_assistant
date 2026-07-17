@@ -7,7 +7,7 @@ from samples import email_input, email_input1
 
 def main():
     assistant = EmailAssistant(profile, prompt_instructions, user_id="Ibrahim1")
-    print(assistant.ask("what is my availability for tuesday?").pretty_print())
+    # print(assistant.ask("what is my availability for tuesday?").pretty_print())
     response = assistant.process_email(email_input)
     for m in response["messages"]:
          m.pretty_print()
